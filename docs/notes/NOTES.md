@@ -586,6 +586,99 @@ Differences from the GVSoC website docs: the tutorials are in
 - Latency and pending calls in `docs/reference/gvsoc_api.md` are now marked
   as run.
 
+### GVS1 step 12: tutorial 10, interconnect timing
+
+- 2026-10-11. Working copy in
+  `tutorials/10_how_to_customize_an_interconnect_timing` (`my_system.py` as
+  in `solution/`, `main.c` changed to use the loaded values); write-up in
+  `docs/tutorials/10_interconnect_timing.md`.
+- Gone through on micaseb19 in the container. The figures in this entry are
+  from the check run of the same steps on a 2-core Ubuntu 24.04 machine at
+  the same pins, outside the container. The build time after a tutorial
+  switch was not measured there (a first build of everything, 7 min 11 s).
+- Tutorial 10 starts from tutorial 4's component; `solution/` holds only
+  `my_system.py`. Nothing is written in C++: the timing of the router is two
+  arguments of its generator, `latency` (on the router, or on one mapping
+  with `o_MAP(..., latency=)`) and `bandwidth` (bytes per cycle, 0 = no
+  limit, which is the default). Both are properties read from
+  `gvsoc_config.json`: a change needs no rebuild and gives no platform tree
+  warning.
+- The tutorial text is out of date. Its `main.c` loads into a register that
+  is never read, so the loop runs at one load per cycle with any latency or
+  bandwidth (8 cycles per iteration, as with no timing). Its trace of a
+  stalled `sd` does not happen at the pin: a store is not delayed. The
+  default bandwidth is 0, not 4.
+- `latency=100` on the `mem` mapping, tutorial `main.c`: the run ends at
+  cycle 2039 against 341. The 1698 cycles are the loader (first instruction
+  at cycle 103, not 3), 14 instruction fetches of 100 each, and two loads of
+  the start-up code whose value is used at once (100 and 98).
+- The core fetches through a one-line buffer of 64 bytes
+  (`prefetch_single_line.cpp`): one 64-byte read on the fetch port each time
+  the program counter leaves the line, also for a line fetched before. The
+  fetch goes through the router like data, and a fetch latency stalls the
+  core.
+- With `main.c` changed to add up the four loaded values (12 cycles per
+  iteration with no timing): `latency=100` gives 111 cycles per iteration.
+  The four loads still go out in four consecutive cycles and their latencies
+  overlap; four loads cost one latency. A latency delays each request and
+  does not make requests wait for each other.
+- `bandwidth=1`, no latency: 20 cycles per iteration. A 4-byte load takes
+  the router for 4 cycles and the next one gets the remaining cycles as
+  latency (3, 6, 9 for the second to fourth load; `next_burst` 12892, 12896,
+  12900, 12904 in the router trace). The first instruction is at cycle
+  12127: the loader's write of 12124 bytes takes 12124 cycles. The run ends
+  at cycle 17491. With both (the solution): 120 cycles per iteration, end at
+  cycle 27057.
+- How it works (read in `interco/router/router.cpp`, and matching the
+  traces): the synchronous router forwards the request inside the master's
+  call and only writes two fields of the request, `latency` (cycles until it
+  is served) and `duration` (`ceil(size / bandwidth)`). There is one limiter
+  per input port and one per mapping, each with a read and a write counter
+  ("free again from cycle N"); a request passes the limiter of its input,
+  then the one of its mapping. The router's `latency` is added in the input
+  limiter, a mapping's `latency` in the mapping limiter.
+- A request that finds the router free gets latency 0 and only a duration.
+  The RV64 core reads only the latency, so a single access costs it nothing
+  at any bandwidth; the loader reads latency plus duration
+  (`get_full_latency()`). The bandwidth limits a flow, it is not a cost per
+  access: `bandwidth=4` and `bandwidth=8` leave the loop at 12 cycles.
+- Tried beyond the tutorial, with three more loops (four loads of
+  `my_comp`'s register, 12 cycles; four stores, 8 cycles; two loads and two
+  stores in turn, 10 cycles):
+  - `latency=7` on the `comp` mapping: 18 cycles, and nothing else is
+    delayed. Router latency 5 plus mapping latency 7: 23 cycles; they add.
+    `bandwidth=1` plus `latency=7`: 27 cycles; wait and latency add.
+  - Stores only: 8 cycles with `latency=100` and with `bandwidth=1`. This
+    core ignores a store's latency (step 11), so this router never slows a
+    store down.
+  - Loads and stores in turn, `bandwidth=1`: 11 cycles (reads and writes
+    have separate counters). With `shared_rw_bandwidth=True`: 16 cycles; the
+    stores then cost time through the loads behind them.
+  - Fetch on its own router input (`host.o_FETCH(ico.i_INPUT(1))`): a load
+    to `my_comp` no longer queues behind a fetch (first iteration 20 cycles
+    against 79). No rebuild.
+  - A loop that crosses a 64-byte line fetches twice per iteration: at
+    `bandwidth=1` iterations of 185 and 87 cycles in turn, against 11 when
+    compiled with `-falign-loops=64`. With no router timing both take 10.
+  - A request that crosses two mappings (the loader's write, with the
+    memory split in two) is split by the router into one request per
+    mapping.
+  - `--stats`: `/soc/ico` has reads, writes, bytes and average bandwidth,
+    and no count of delayed cycles. `--vcd --event=ico`: an `addr` and a
+    `size` signal per mapping.
+  - `synchronous=False` is another C++ model (`router_async.cpp`): without
+    a rebuild `Couldn't find component`, then 15 s of `make gvsoc`. It holds
+    each request and answers later, so stores stall too (2 cycles apart, 4
+    with `bandwidth=1`), a load costs one more cycle, and latencies are
+    ignored. A program that calls `printf` aborts with
+    `Pending IO response during debug request` (exit code 134): semihosting
+    reads memory through the data port and cannot take a pending answer.
+- Question answered: tutorials 8 (multiple cores) and 9 (clock domains) are
+  skipped by the plan, not optional steps; tutorial 10 does not build on
+  them. Two masters on one router are measured in GVS2 on the Snitch target.
+- Router arguments and the request's `duration` added to
+  `docs/reference/gvsoc_api.md`.
+
 ## Findings for later tasks
 
 ### GVS2
@@ -636,6 +729,27 @@ Differences from the GVSoC website docs: the tutorials are in
   more cycle on loads). The stock bank model reports contention as
   latency, so this would decide whether a core sees bank conflicts on
   stores.
+- The cluster's routers are the synchronous `Router` of tutorial 10 with a
+  bandwidth and no latency (read in `snitch_cluster.py`): `wide_axi` and
+  `tcdm_dma_ico` 64, `narrow_axi` 8, one `pe<N>_ico` per core with
+  `arch.tcdm.bank_width`. Measured on the tutorial system (step 12): this
+  router only writes a latency and a duration into the request and never
+  holds it; the bandwidth is kept per input port and per mapping, so two
+  masters delay each other only when they share one of the two; a request
+  that finds the router free gets latency 0. To measure on the `snitch`
+  target: whether the Snitch core and the DMA read the duration
+  (`get_full_latency()`) or only the latency, since that decides what a
+  bandwidth of 8 or 64 costs them.
+- On the tutorial core a store ignores its latency, so a synchronous router
+  or a bank that reports contention as latency never slows a store. If the
+  Snitch core does the same, store contention on L1 is invisible in cycle
+  counts unless the path holds the request (pending), as the asynchronous
+  router does.
+- Instruction fetch goes through the interconnect and stalls the core on a
+  latency. The tutorial core refetches a 64-byte line at each line change;
+  the tree has a Snitch instruction cache model (`snitch_icache.cpp`);
+  whether the `snitch` target uses it is not checked. Fetch cost has to be
+  kept apart from data cost when reading cycle counts.
 
 ### GVS3
 
@@ -771,3 +885,22 @@ Differences from the GVSoC website docs: the tutorials are in
 - Long waits cost little host time: a billion stalled cycles took about 7 s.
   A program that waits on an accelerator is cheap to simulate; one that
   polls runs an instruction stream for the whole wait.
+- Interconnect timing is generator arguments (`latency`, `bandwidth`), read
+  from `gvsoc_config.json`: sweeping them needs no rebuild (step 12). For
+  SNAX-GVSoC the platform file's link widths and path costs can go straight
+  into those arguments. `synchronous=False` is another model and needs a
+  build once.
+- A latency says when one request is served; it does not make requests wait
+  for each other. A streamer or accelerator port that serves one beat per
+  cycle needs a busy-until counter like the router's limiter (or the bank
+  model's `next_packet_start`), not only `inc_latency`.
+- A model that issues requests itself (a streamer) has to decide what to do
+  with the latency and the duration it gets back: wait for
+  `get_full_latency()` before the next beat, as the loader does, or the
+  bandwidth of the path has no effect on it. To look at in step 15.
+- The router has no statistic for cycles lost to the bandwidth limit, and
+  the bank model none for conflicts. Our L1 path needs its own counters for
+  "cycles a request was delayed", per port, to feed the profiles.
+- `printf` (semihosting) aborts behind an asynchronous router. If the SNAX
+  model ever holds requests on the path between a core and its memory, the
+  debug requests (`req->get_debug()`) must be answered at once.

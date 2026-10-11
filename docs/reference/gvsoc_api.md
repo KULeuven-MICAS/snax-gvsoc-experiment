@@ -10,7 +10,7 @@ Pinned to gvsoc `93cedc4`. Signatures can change with the pin.
 Only what has been used is listed, not everything a header offers. The
 "Checked" column says how far an entry is trusted:
 
-- **T0** to **T7**: built and run in that tutorial (pages in
+- **T0** to **T7**, **T10**: built and run in that tutorial (pages in
   `docs/tutorials/`).
 - **read**: read from the source at the pin, not run.
 
@@ -109,6 +109,8 @@ this->new_slave_port("input", &this->input_itf);
 | `req->inc_latency(uint64_t n)` | Adds `n` cycles to the request's latency, with a synchronous `IO_REQ_OK`. Only a number in the request: no event, no state in the model. Every component on the path can add its own | T7 |
 | `req->set_latency(n)` | Keeps the larger of the current latency and `n` | T7 |
 | `req->get_latency()` | What earlier components on the path have put there; 0 behind a router without latency | T7 |
+| `req->set_duration(uint64_t n)`, `get_duration()` | The second timing field: how many cycles the transfer itself takes. `set_duration` keeps the larger value. A router with a bandwidth and the memory model set it | T10 through the router; the calls read |
+| `req->get_full_latency()` | Latency plus duration: what a master waits when it accounts for the whole transfer. The loader uses it; the RV64 core reads only `get_latency()` | T10 through the loader; the call read |
 | `vp::IoMaster`, `req(IoReq *)`, `set_resp_meth`, `set_grant_meth`, `is_bound()` | The master side: a component that issues requests itself (a streamer). Step 15 | read |
 
 What a latency does is up to the master. Measured on the tutorial's RV64
@@ -368,13 +370,23 @@ under `core/models/`.
 | Component | Arguments and ports used | Checked |
 |---|---|---|
 | `vp.clock_domain.Clock_domain(parent, name, frequency)` | A clock generator, `frequency` in Hz. `clock.o_CLOCK(soc.i_CLOCK())` gives the clock to a component and everything under it | T0 |
-| `interco.router.Router(parent, name, latency=0, bandwidth=0, synchronous=True, ...)` | A memory-mapped router. `ico.i_INPUT()` is its input; several masters can bind to it | T0; `latency` and `bandwidth` read (step 12) |
-| `ico.o_MAP(itf, name=None, base=0, size=0, rm_base=True, remove_offset=0, latency=0)` | Maps `base .. base+size-1` to a slave. `rm_base`: subtract `base`, so the slave sees an offset | T0, T1 |
+| `interco.router.Router(parent, name, latency=0, bandwidth=0, synchronous=True, shared_rw_bandwidth=False, max_input_pending_size=0)` | A memory-mapped router. `latency`: cycles added to every request. `bandwidth`: bytes per cycle, 0 for no limit; a request takes the router for `ceil(size / bandwidth)` cycles and one that arrives meanwhile gets the remaining cycles as latency. `shared_rw_bandwidth`: one counter for reads and writes where there are two. `synchronous=False`: another C++ model that holds requests and answers later; needs a build, ignores latencies, breaks semihosting `printf`. `max_input_pending_size`: input FIFO of the asynchronous router | T0; `latency`, `bandwidth`, `shared_rw_bandwidth`, `synchronous` T10; the last one read |
+| `ico.i_INPUT(id=0)` | The input port `input`, or `input_<id>`. Several masters can bind to one input and then share its bandwidth limiter; an `id` of its own gives a master its own limiter | T0; `id` T10 |
+| `ico.o_MAP(itf, name=None, base=0, size=0, rm_base=True, remove_offset=0, latency=0)` | Maps `base .. base+size-1` to a slave. `rm_base`: subtract `base`, so the slave sees an offset. `latency`: cycles added to every request through this mapping, on top of the router's. Each mapping has its own bandwidth limiter | T0, T1; `latency` T10 |
 | `memory.memory.Memory(parent, name, size)` | A memory of `size` bytes; `mem.i_INPUT()` | T0 |
 | `cpu.iss.riscv.Riscv(parent, name, isa='rv64imafdc', binaries=[binary])` | The RV64 core, modelled by the instruction set simulator. `o_FETCH(itf)`, `o_DATA(itf)` (mandatory), `o_DATA_DEBUG(itf)` (GDB only), `i_FETCHEN()`, `i_ENTRY()` | T0 |
 | `utils.loader.loader.ElfLoader(parent, name, binary=binary)` | Writes the ELF through `o_OUT(itf)`, then starts the core through `o_START(itf)` and `o_ENTRY(itf)`. Without these two the simulation never ends | T0 |
 | `gvrun.parameter.TargetParameter(self, name='binary', value=None, description='...').get_value()` | A parameter of the target, set on the command line with `--parameter binary=<elf>` | T0 |
 | `class Target(gvsoc.runner.Target)` with `model`, `name`, `description` | The top that `gvrun --target-dir=<dir> --target=<file name>` instantiates | T0 |
+
+Router timing (T10, `docs/tutorials/10_interconnect_timing.md`): the
+synchronous router forwards a request inside the master's call and only
+writes `latency` and `duration` into it. A request passes the limiter of its
+input port, then the one of its mapping. A request that finds the router
+free gets latency 0, so the bandwidth limits a flow and is not a cost per
+access. `latency`, `bandwidth` and the mappings are properties: changing
+them needs no rebuild. Fetches and the loader's write go through the router
+like data.
 
 The generator runs twice: at build time, to list the models to compile, and
 at run time, to write `build/work/gvsoc_config.json`. A change of values or
@@ -415,5 +427,8 @@ Passed in the tutorials as `make run runner_args="..."`.
 - Guard optional output wires with `is_bound()`.
 - Give traces, signals and registers their own names; `trace` and `comp`
   are taken by the base classes.
+- A latency delays one request; it does not make requests wait for each
+  other. Something that serves one thing at a time needs a busy-until
+  counter, as the router's bandwidth limiter has.
 - Profiling runs use no `--trace`, `--vcd` or `--event`. Numbers that are
   needed in every run are statistics.
