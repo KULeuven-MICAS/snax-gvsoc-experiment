@@ -533,6 +533,59 @@ Differences from the GVSoC website docs: the tutorials are in
   unit that holds one operation at a time also needs a `busy` check.
 - `vp::ClockEvent` added to `docs/reference/gvsoc_api.md`.
 
+### GVS1 step 11: tutorial 7, IO request interface
+
+- 2026-10-11. Working copy in
+  `tutorials/7_how_to_use_the_io_request_interface`; write-up in
+  `docs/tutorials/7_io_requests.md`.
+- Gone through on micaseb19 in the container. The figures in this entry are
+  from the check run of the same steps on a 2-core Ubuntu 24.04 machine at
+  the same pins, outside the container; the committed working copy was built
+  and run there too (both `Hello` lines, last instruction at cycle 5907).
+- Tutorial 7 starts from tutorial 3's single component; `solution/` holds
+  only `my_comp.cpp`. Build after the tutorial switch: 2 min 23 s (197
+  files); a rebuild after an edit: 4 s. The tutorial's `main.c` never reads
+  the second register, so a read of `0x20000004` has to be added to see the
+  asynchronous path. `testset.cfg` only checks the first line.
+- Synchronous answer with latency: `req->inc_latency(1000)` before
+  `return vp::IO_REQ_OK`. The latency is a number in the request; nothing is
+  scheduled.
+- The tutorial text is out of date on what the core does with it. At the
+  pin the RV64 core does not stall at the load: the load at cycle 158
+  completes, the core runs on, and it stalls at `c.sdsp a1` (cycle 167), the
+  first instruction that reads the loaded register; the next instruction is
+  at cycle 1161. With the use three instructions after the load, latencies
+  of 2, 3, 4, 10 and 1000 put the next instruction at load cycle + latency
+  + 3; latencies of 0 and 1 cost nothing. The tutorial program ends at
+  cycle 2530 against 1537 without latency.
+- A store's latency is ignored by this core: with 0, 1000 and 100000 the
+  program ended at cycle 288 each time.
+- `inc_latency` adds (twice 1000 gave 2000); `set_latency` keeps the larger
+  value. The request arrives with latency 0 through the router.
+- Asynchronous answer: keep the `vp::IoReq *`, `event.enqueue(2000)`, return
+  `vp::IO_REQ_PENDING`; in the event's callback write the data and call
+  `req->get_resp_port()->resp(req)`. The request arrives at cycle 2504 and
+  the load's trace line appears at cycle 4504 with the value; no instruction
+  runs in between. The core is stalled at the instruction itself.
+- Pending works for stores: a store answered with `IO_REQ_PENDING` was held
+  from cycle 161 to 2161. On this core it is the only way to make a store
+  take time.
+- `resp()` never called: the run never ends, with no message (killed after
+  20 s). `resp()` called twice:
+  `[/soc/host/exec] Trying to decrease zero stalled counter`, abort, exit
+  code 134. `resp()` in the same cycle (`enqueue(0)`) works. A latency added
+  just before `resp()` adds to the wait at the use of the value.
+- `IO_REQ_DENIED`, then `grant(req)` 2000 cycles later and `resp(req)` 2000
+  cycles after that: the load completes at cycle 4158 with the right value,
+  the core stalled throughout. One run; the meaning of `grant` (the slave
+  now owns the request) is from the comments in `io.hpp`.
+- A latency of 1000000000 cycles ended the run at cycle 1000000965 in 7.9 s
+  of host time, against about 1 s without: waiting is cheap, not free.
+- Not checked: whether the router is in the return path of `resp()`; any of
+  this on the Snitch core.
+- Latency and pending calls in `docs/reference/gvsoc_api.md` are now marked
+  as run.
+
 ## Findings for later tasks
 
 ### GVS2
@@ -574,6 +627,15 @@ Differences from the GVSoC website docs: the tutorials are in
   describes an accelerator's registers in that format for the RTL, the same
   file can generate the GVSoC model's map. How SNAX's CSR manager lists its
   registers has not been read yet.
+- To measure on the `snitch` target: what the Snitch core does with a
+  latency on a load and on a store, and with `IO_REQ_PENDING`. On the
+  tutorial's RV64 core a load's latency stalls at the first use of the
+  value and a store's latency is ignored (step 11). The Snitch build takes
+  other branches in `gvsoc/core/models/cpu/iss/src/lsu.cpp`
+  (`CONFIG_GVSOC_ISS_SNITCH`: stores "without an answer to the core", one
+  more cycle on loads). The stock bank model reports contention as
+  latency, so this would decide whether a core sees bank conflicts on
+  stores.
 
 ### GVS3
 
@@ -689,3 +751,23 @@ Differences from the GVSoC website docs: the tutorials are in
   program has to wait (poll `busy`, or an interrupt).
 - `this->clock.get_cycles()` gives a model the current cycle, for
   `busy_cycles` counters and for stamping events for the run viewer.
+- Two ways to make the core wait on a register access of an accelerator:
+  a latency (a number in the request, no event, no state) for a fixed
+  access cost, and `IO_REQ_PENDING` with `resp()` when the wait depends on
+  the model, e.g. a blocking write to `start` answered by the event that
+  ends the run. A blocking `start` and a polled `busy` are both possible;
+  which one matches SNAX's software is to be checked.
+- A pending request is a contract: exactly one `resp()`. A forgotten one
+  hangs the run with no message, a second one aborts. Our components should
+  keep the pending request in one place and clear the pointer when they
+  answer.
+- While its request is pending a core is stalled, so one core cannot send a
+  second one. With several masters (cores, DMA, streamers) on the same
+  slave that no longer holds: a slave that answers `IO_REQ_PENDING` needs a
+  queue, or `IO_REQ_DENIED` and `grant()` for the others.
+- `IO_REQ_DENIED` / `grant()` is the back-pressure of the `io` interface
+  (run once). It is the candidate for a streamer port that cannot accept in
+  this cycle; the master side of it is in step 15.
+- Long waits cost little host time: a billion stalled cycles took about 7 s.
+  A program that waits on an accelerator is cheap to simulate; one that
+  polls runs an instruction stream for the whole wait.

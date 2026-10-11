@@ -10,7 +10,7 @@ Pinned to gvsoc `93cedc4`. Signatures can change with the pin.
 Only what has been used is listed, not everything a header offers. The
 "Checked" column says how far an entry is trusted:
 
-- **T0** to **T6**: built and run in that tutorial (pages in
+- **T0** to **T7**: built and run in that tutorial (pages in
   `docs/tutorials/`).
 - **read**: read from the source at the pin, not run.
 
@@ -76,7 +76,8 @@ it itself.
 
 `vp/itf/io.hpp`. The port type behind every memory-mapped access. A request
 is a direct function call from the master into the slave's handler; it takes
-no simulated time unless the handler says so (tutorial 7).
+no simulated time unless the handler says so, with a latency or a pending
+answer.
 
 Slave side:
 
@@ -102,9 +103,21 @@ this->new_slave_port("input", &this->input_itf);
 | `req->get_opcode()` | `IoReqOpcode`: `READ`, `WRITE`, and the atomics `LR`, `SC`, `SWAP`, `ADD`, ... | read |
 | return `vp::IO_REQ_OK` | The request is done, now | T1 |
 | return `vp::IO_REQ_INVALID` | Error. The RV64 core takes a load or store fault; the tutorial runtime exits 1 and `gvrun` prints `Platform returned an error (exitcode: 1)` with no address. Not checked on Snitch | T1 |
-| return `vp::IO_REQ_PENDING`, `vp::IO_REQ_DENIED` | The answer comes later through `resp()`; not accepted now, the master waits for `grant()`. Tutorial 7 | read |
-| `req->inc_latency(n)`, `set_latency(n)`, `get_latency()` | Cycles this request takes, relative to the current cycle. Tutorial 7 | read |
+| return `vp::IO_REQ_PENDING` | Accepted, not done. The request belongs to the slave until it calls `resp(req)`, exactly once. The core is stalled at the instruction, for a load and for a store. Keep the `vp::IoReq *`; it stays valid until the answer | T7 |
+| `req->get_resp_port()->resp(req)` | The answer to a pending request. `get_resp_port()` is the `vp::IoSlave *` the request came in through, stored in the request by the master's `req()`. Write the data before the call. Never calling it hangs the run with no message; calling it twice aborts with `Trying to decrease zero stalled counter` | T7 |
+| return `vp::IO_REQ_DENIED`, then `req->get_resp_port()->grant(req)` | Not accepted now. `grant(req)` later means accepted; `resp(req)` after that ends the request. The core is stalled throughout | T7, one run |
+| `req->inc_latency(uint64_t n)` | Adds `n` cycles to the request's latency, with a synchronous `IO_REQ_OK`. Only a number in the request: no event, no state in the model. Every component on the path can add its own | T7 |
+| `req->set_latency(n)` | Keeps the larger of the current latency and `n` | T7 |
+| `req->get_latency()` | What earlier components on the path have put there; 0 behind a router without latency | T7 |
 | `vp::IoMaster`, `req(IoReq *)`, `set_resp_meth`, `set_grant_meth`, `is_bound()` | The master side: a component that issues requests itself (a streamer). Step 15 | read |
+
+What a latency does is up to the master. Measured on the tutorial's RV64
+core (T7): a load's latency does not stall the load; the destination
+register becomes valid later, and the core stalls at the first instruction
+that reads it (next instruction at load cycle + latency + 3). A store's
+latency is ignored. A latency set before `resp()` on a pending load adds to
+the wait. Not measured on the Snitch core, which takes other branches of
+`gvsoc/core/models/cpu/iss/src/lsu.cpp`.
 
 An unanswered load keeps what was in the destination: `lw` returns the old
 register value, `lbu` returns 0 (T1).
@@ -389,6 +402,10 @@ Passed in the tutorials as `make run runner_args="..."`.
   latency on a request (tutorial 7) or from a clock event (tutorial 6).
 - Compute a result at once and delay only its arrival: the function is
   plain C++, the timing is the number given to `enqueue`.
+- To make the core wait on an access: a latency for a fixed cost on a load,
+  `IO_REQ_PENDING` and `resp()` when the wait depends on the model's state
+  or when the access is a store. Every pending request needs exactly one
+  `resp()`.
 - Have the model's state consistent before driving a wire: the callee may
   call back into it.
 - Check mandatory ports and properties in the model. GVSoC reports neither
