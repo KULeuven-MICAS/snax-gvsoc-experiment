@@ -12,6 +12,11 @@ Only what has been used is listed, not everything a header offers. The
 
 - **T0** to **T7**, **T10**: built and run in that tutorial (pages in
   `docs/tutorials/`).
+- **T16**: run for the tutorial 16 page, on the check machine only (step 13
+  is on hold).
+- **HWPE**: from the HWPE tutorial (`docs/tutorials/hwpe_accelerator.md`):
+  run in its final state on the check machine, or with the small master
+  written to try the calls.
 - **read**: read from the source at the pin, not run.
 
 A new step adds its classes here, as it adds an entry to `NOTES.md`.
@@ -23,6 +28,7 @@ Headers are relative to `gvsoc/engine/engine/include/`; Python files to
 
 - [Model skeleton: vp::Component](#model-skeleton-vpcomponent)
 - [Memory-mapped requests: io](#memory-mapped-requests-io)
+- [Issuing requests: vp::IoMaster](#issuing-requests-vpiomaster)
 - [Wires](#wires)
 - [Traces: vp::Trace](#traces-vptrace)
 - [VCD signals: vp::Signal](#vcd-signals-vpsignal)
@@ -33,6 +39,7 @@ Headers are relative to `gvsoc/engine/engine/include/`; Python files to
 - [Python generator of a component](#python-generator-of-a-component)
 - [Python generator of a system](#python-generator-of-a-system)
 - [gvrun options](#gvrun-options)
+- [Control from Python: the proxy](#control-from-python-the-proxy)
 - [Rules of thumb](#rules-of-thumb)
 
 ## Model skeleton: vp::Component
@@ -111,7 +118,7 @@ this->new_slave_port("input", &this->input_itf);
 | `req->get_latency()` | What earlier components on the path have put there; 0 behind a router without latency | T7 |
 | `req->set_duration(uint64_t n)`, `get_duration()` | The second timing field: how many cycles the transfer itself takes. `set_duration` keeps the larger value. A router with a bandwidth and the memory model set it | T10 through the router; the calls read |
 | `req->get_full_latency()` | Latency plus duration: what a master waits when it accounts for the whole transfer. The loader uses it; the RV64 core reads only `get_latency()` | T10 through the loader; the call read |
-| `vp::IoMaster`, `req(IoReq *)`, `set_resp_meth`, `set_grant_meth`, `is_bound()` | The master side: a component that issues requests itself (a streamer). Step 15 | read |
+| `req->is_debug()` | `true` for an access that should not count for timing (the proxy's accesses, semihosting). The memory model skips its timing for it; the router does not look at it | T16, HWPE |
 
 What a latency does is up to the master. Measured on the tutorial's RV64
 core (T7): a load's latency does not stall the load; the destination
@@ -123,6 +130,56 @@ the wait. Not measured on the Snitch core, which takes other branches of
 
 An unanswered load keeps what was in the destination: `lw` returns the old
 register value, `lbu` returns 0 (T1).
+
+## Issuing requests: vp::IoMaster
+
+`vp/itf/io.hpp`. The other end of an `io` binding: a component that sends
+requests itself (an accelerator's port into L1, a streamer, a DMA).
+
+```cpp
+vp::IoMaster out_itf;
+vp::IoReq req;                 // one object per request in flight
+uint32_t data;
+
+static void handle_resp(vp::Block *__this, vp::IoReq *req);
+static void handle_grant(vp::Block *__this, vp::IoReq *req);
+
+// in the constructor
+this->out_itf.set_resp_meth(&MyMaster::handle_resp);
+this->out_itf.set_grant_meth(&MyMaster::handle_grant);
+this->new_master_port("out", &this->out_itf);
+
+// to send
+this->req.init();
+this->req.set_addr(addr);
+this->req.set_size(4);
+this->req.set_is_write(false);
+this->req.set_data((uint8_t *)&this->data);
+vp::IoReqStatus status = this->out_itf.req(&this->req);
+```
+
+| Call | Arguments and meaning | Checked |
+|---|---|---|
+| `vp::IoMaster` | An output port for requests. Declared with `new_master_port(name, &port)`; in the generator `self.itf_bind(name, slave_itf, signature='io')` | HWPE |
+| `vp::IoReq` | The request object. It belongs to the master; the slave works on it and may keep a pointer until it answers. One object means one request in flight | HWPE |
+| `req.init()` | Sets latency and duration to 0 and clears the debug flag and the argument stack. Before every reuse | HWPE |
+| `req.set_addr(uint64_t)`, `set_size(uint64_t)`, `set_is_write(bool)` | The access. The address is what the bound slave expects: a bus address into a router, an offset into an interleaver or a memory | HWPE |
+| `req.set_data(uint8_t *)` | The master's buffer: source of a write, destination of a read. It must stay valid until the answer | HWPE |
+| `req.set_debug(true)` | Marks the access as not counting for timing; the memory model then skips its bank timing | read (the HWPE model does it for its weights) |
+| `port.req(&req)` | Sends the request: a direct call into the slave's handler. Returns `IO_REQ_OK` (0), `IO_REQ_INVALID` (1), `IO_REQ_DENIED` (2) or `IO_REQ_PENDING` (3) | HWPE, all four |
+| After `IO_REQ_OK` | The data is in the buffer. `req.get_latency()` is what the path charged, `req.get_duration()` the length of the transfer behind a bandwidth or a bank width. Waiting is up to the master | HWPE |
+| After `IO_REQ_INVALID` | Nothing else happens: no message, no fault. From a router for an unmapped address, or from the slave | HWPE |
+| `set_resp_meth(void (*)(vp::Block *, vp::IoReq *))` | The callback for the answer to a pending or denied request. It gets the master's own request object back, with the data in and a latency that may be non-zero. Not set: an empty default, so the answer is lost with no message | HWPE |
+| `set_grant_meth(void (*)(vp::Block *, vp::IoReq *))` | The callback for `grant()` after `IO_REQ_DENIED`: the slave has now accepted the request; the response follows | HWPE |
+| `req.get_addr()` after the call | What the path made of it: a router subtracts its mapping's base in the request. Keep the address in the model | HWPE |
+| `port.is_bound()` | `false` when nothing is bound | read |
+| `port.req_forward(&req)` | For a component in the middle (router, interleaver): passes a request on and leaves the response port as it is, so the answer goes back to the first master | read |
+
+The stock accelerator models (HWPE tutorial, datamover) issue all requests
+of a phase in one call, keep the largest latency and wait that plus one
+cycle; they treat any answer but OK as fatal. A master that sends one beat
+per cycle waits `get_latency() + 1` cycles after an OK, or for the response
+callback after a pending answer.
 
 ## Wires
 
@@ -324,6 +381,7 @@ ordered by ready cycle, and one event set for the earliest entry
 |---|---|---|
 | `this->stats.register_stat(StatCommon *stat, name, desc)` | Registers a counter; `--stats` writes all of them to `build/work/stats.txt` at the end of the run. Example in `gvsoc/core/models/memory/memory.cpp` | read; `--stats` output seen in T3 |
 | A class derived from `vp::Block`, built with a parent and a name | A sub-unit inside one model: own path, traces, registers and clock events, no bindable ports. `vp::regmap` is one; the Snitch fast core's `Ssr` is another | T5 for `vp::regmap`; otherwise read |
+| `std::string handle_command(gv::GvProxy *proxy, FILE *req_file, FILE *reply_file, std::vector<std::string> args, std::string req) override` | A virtual method of every block (`vp/block.hpp`, with `#include <vp/proxy.hpp>`). Called for the proxy command `component <handle> <args...>`; the returned string is the reply. The router implements `mem_read` and `mem_write` this way | T16 |
 
 ## Python generator of a component
 
@@ -406,6 +464,35 @@ Passed in the tutorials as `make run runner_args="..."`.
 | `--event=REGEX` | Which signals are dumped. `--vcd` alone dumps almost nothing | T4 |
 | `--stats` | Writes `build/work/stats.txt`; uses the profile build, about 2.7 times slower | T3 |
 | `--no-werror` | A model warning no longer ends the run | T5 |
+| `--debug-mode` | Uses the debug build without any `--trace`, so traces can be switched on later through the proxy | T16 |
+| `--proxy`, `--proxy-port=<n>`, `--control-script=<file>` | See "Control from Python: the proxy" | T16 |
+
+## Control from Python: the proxy
+
+`engine/python/gvsoc/gvsoc_control.py` (installed in
+`build/install/python`, on `PYTHONPATH` after `sourceme.sh`), engine side in
+`engine/engine/src/proxy.cpp`. Walk-through and the rough edges in
+`docs/tutorials/16_python_control.md`.
+
+| Call | Arguments and meaning | Checked |
+|---|---|---|
+| `gvrun ... run --proxy --proxy-port=<n>` | Starts GVSoC with the proxy; it prints `Opened proxy on socket <n>` and waits for a client. Default port 42951 | T16 |
+| `gvrun ... run --control-script=<file.py>` | Starts GVSoC on a free port, connects and calls `target_control(proxy)` of the file; its return value is the exit status | T16 |
+| `gvsoc.Proxy(host='localhost', port=42951)` | Connects (`import gvsoc.gvsoc_control as gvsoc`) | T16 |
+| `gv.run(duration)` | Runs for `duration` picoseconds and returns when stopped. Without a duration: starts and returns at once | T16 |
+| `gv.step_cycles(clock_index, n)` | Runs `n` cycles of one clock; the index is the position in `gv.get_clock_domains()`. Returns the time in ps as a string | T16 |
+| `gv.stop()`, `gv.join()` | Halts a running simulation; waits for the program to exit and returns its exit code | T16 |
+| `gv.quit(status)`, `gv.terminate()`, `gv.close()` | This client leaves; force the simulation to end; close the socket. GVSoC exits when the simulation is over and every client has quit | T16 |
+| `gv.reader.timestamp` | The time of the last stop, in ps | T16 |
+| `gvsoc.Router(gv, path='**/soc/ico')` | A handle on a router. A path that matches nothing gives handle `0x0` and crashes GVSoC on the first command | T16 |
+| `r.mem_read(addr, size)`, `r.mem_write(addr, size, bytes)`, `mem_read_int`, `mem_write_int` | An access through the router's own routing, with the debug flag. A read of an unmapped address returns garbage with no error | T16 |
+| `gv._get_component(path)`, `gv._send_cmd('component %s <args>' % handle)` | The two calls under every wrapper class: a handle for a path, and a command to that component's `handle_command`. The reply string is returned | T16 |
+| `gv.trace_add(regex)`, `trace_remove`, `trace_level` | Traces at run time; only with `--debug-mode` | T16 |
+| `gv.event_add(regex)` | Never returns at the pin | T16 |
+
+Each step and memory access takes 44 ms of host time unless the client
+socket has `TCP_QUICKACK` set before each read and `TCP_NODELAY` set (code
+in the tutorial page).
 
 ## Rules of thumb
 
@@ -430,5 +517,10 @@ Passed in the tutorials as `make run runner_args="..."`.
 - A latency delays one request; it does not make requests wait for each
   other. Something that serves one thing at a time needs a busy-until
   counter, as the router's bandwidth limiter has.
+- One request object per request in flight. `init()` it before every reuse,
+  and keep the address in the model.
+- A master either handles all four answers of `req()` or checks in one place
+  that its path can only answer OK. Unset response and grant callbacks lose
+  the answer with no message.
 - Profiling runs use no `--trace`, `--vcd` or `--event`. Numbers that are
   needed in every run are statistics.

@@ -4,6 +4,8 @@ GVS1 is the first task of X1, the SNAX-GVSoC exploration (D115 in
 snax-forge). Goal: a working GVSoC set-up with Snitch programs running, and
 enough of the developer tutorials to write an accelerator model.
 
+GVS1 was closed on 2026-10-11 (step 16); the summary is in `NOTES.md`.
+
 This file is the checklist. `NOTES.md` is the log: what was run, what came
 out, what was learned. Tick a step here when its entry is in `NOTES.md`.
 
@@ -37,13 +39,16 @@ out, what was learned. Tick a step here when its entry is in `NOTES.md`.
 | 10 | Tutorial 6: timing | `ClockEvent` | 30 min | done 2026-10-08 |
 | 11 | Tutorial 7: IO request interface | Synchronous latency, pending and `resp()` | 45 min | done 2026-10-11 |
 | 12 | Tutorial 10: interconnect timing | Router latency and bandwidth | 20 min | done 2026-10-11 |
-| 13 | Tutorial 16: control from Python | The proxy: step, read and write memory | 30 min | |
-| 14 | Tutorial 19: standalone testbench (optional) | Testing a model with no core | 30 min | |
-| 15 | Read the HWPE tutorial, no build | A full accelerator: config port, FSM, streamer into L1 | 60 min | |
-| 16 | Close `NOTES.md` | | 15 min | |
+| 13 | Tutorial 16: control from Python (optional) | The proxy: step, read and write memory | 30 min | on hold: page written 2026-10-11, not gone through |
+| 14 | Tutorial 19: standalone testbench (optional) | Testing a model with no core | 30 min | skipped 2026-10-11 |
+| 15 | Read the HWPE tutorial, no build | A full accelerator: config port, FSM, streamer into L1 | 60 min | done 2026-10-11 (read) |
+| 16 | Close `NOTES.md` | | 15 min | done 2026-10-11 |
 
-Tutorials 0 to 7 and 10 have been built and run. Tutorials 16 and 19 have
-not been run yet.
+Tutorials 0 to 7 and 10 have been built and run on micaseb19. Tutorial 16
+was only run on the check machine (step 13 is on hold, made optional on
+2026-10-11: no use for it at the moment). Tutorial 19 was not run. The HWPE
+tutorial was read, and its final state built and run once on the check
+machine.
 
 Tutorial 7 only covers the slave side of an IO request. Step 15 is where a
 component issuing its own requests to L1 is shown, which a streamer needs.
@@ -82,6 +87,10 @@ is.
   them.
 - Write-ups: `docs/tutorials/<number>_<topic>.md`, one per tutorial, written
   against the pinned source.
+- The HWPE tutorial is in the `pulp` submodule:
+  `gvsoc/pulp/docs/developer_manual/tutorials_hwpe.rst` and
+  `gvsoc/pulp/docs/developer_manual/tutorials/hwpe`. Its write-up is
+  `docs/tutorials/hwpe_accelerator.md`; it has no number in GVSoC.
 - Reference: `docs/reference/gvsoc_api.md` (classes and calls used so far,
   by class, with their arguments) and `docs/reference/regmap.md` (the
   register map tool). Added in step 9, because GVSoC documents neither.
@@ -92,7 +101,8 @@ is.
 
 ## After GVS1
 
-Kept in view, not started. Findings so far are in `NOTES.md`.
+Not started. What each task starts from is in the step 16 entry and under
+"Findings for later tasks" in `NOTES.md`.
 
 - **GVS2:** does GVSoC's L1 model arbitrate per bank for a port that is not
   a core, and how far is its Snitch target from the SNAX fork (registers,
@@ -105,6 +115,7 @@ Kept in view, not started. Findings so far are in `NOTES.md`.
 
 ## Starting a new thread
 
-Attach this file and `NOTES.md`, and name the step you are at.
+Attach `NOTES.md` and name the task (GVS2 or GVS3). For step 13 or 14,
+attach this file as well.
 
 

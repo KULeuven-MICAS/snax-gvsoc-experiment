@@ -679,6 +679,162 @@ Differences from the GVSoC website docs: the tutorials are in
 - Router arguments and the request's `duration` added to
   `docs/reference/gvsoc_api.md`.
 
+### GVS1 step 13: tutorial 16, control from Python (on hold)
+
+- 2026-10-11. Write-up in `docs/tutorials/16_python_control.md`. Not gone
+  through on micaseb19 and no working copy in `tutorials/`: held as
+  optional, since there is no use for it at the moment. Everything in this
+  entry is from the check run on a 2-core Ubuntu 24.04 machine at the same
+  pins, outside the container.
+- GVSoC started with `--proxy --proxy-port=<n>` opens a TCP socket, prints
+  `Opened proxy on socket <n>` and waits for a client. The option in the
+  tutorial text (`--config-opt=**/gvsoc/proxy/enabled=true`) does nothing at
+  the pin. The client is `gvsoc/engine/python/gvsoc/gvsoc_control.py`:
+  `Proxy.run(ps)` steps and returns, `Proxy.run()` starts and returns at
+  once, `Router.mem_read` / `mem_write` send a request through a router.
+  `gvrun --control-script=<file>` does all of it in one command, calling
+  `target_control(proxy)` of the file.
+- The protocol is text lines, `req=N;cmd=...`. A memory access is the
+  command `component <handle> mem_read ...`, which calls the virtual
+  `handle_command` of that component; any model can offer commands of its
+  own this way (tried: a `get_state` and a `set_value` on a test component).
+- Every step and memory access costs 44 ms of host time, whatever the step
+  length: TCP waiting between the two processes. `TCP_QUICKACK` and
+  `TCP_NODELAY` set on the client socket bring it to about 0.3 ms (code in
+  the page). With them a million cycles of the wait loop take 21 ms.
+- A script access is a normal request with the debug flag. The memory model
+  skips its timing for it; the router does not: with `bandwidth=1` a 64 KB
+  read from the script moved the end of the program from cycle 30864 to
+  96400.
+- Rough edges at the pin: a read of an unmapped address returns garbage with
+  no error (a write raises); `event_add` never returns; `trace_add` needs
+  `--debug-mode`; a wrong path given to `gvsoc.Router` crashes GVSoC on the
+  first command; a script that leaves without `quit` leaves GVSoC waiting.
+
+### GVS1 step 14: tutorial 19, standalone testbench (skipped)
+
+- 2026-10-11. Skipped; it was optional. Nothing read or run.
+
+### GVS1 step 15: the HWPE tutorial, read
+
+- 2026-10-11. Write-up in `docs/tutorials/hwpe_accelerator.md`. Reading
+  only: nothing built on micaseb19, no working copy. What is marked "run"
+  below is from the check machine (2-core Ubuntu 24.04, same pins, outside
+  the container).
+- The tutorial is in the `pulp` submodule of gvsoc, not with the others:
+  text in `gvsoc/pulp/docs/developer_manual/tutorials_hwpe.rst`, files in
+  `gvsoc/pulp/docs/developer_manual/tutorials/hwpe/`, final model in
+  `model_hwpe/solutions/task8/simple_hwpe/`. It works by copying files into
+  the gvsoc tree (a new chip `pulp_open_hwpe`, a model `pulp/simple_hwpe`),
+  so doing it changes the pinned submodule.
+- State at the pin (run): `make integrate_hwpe_sol` fails (a `cluster.json`
+  it copies is not in the tree, and the `cluster.py` solution patch does not
+  apply), and `run_tutorial_ci.sh` names targets that do not exist. With the
+  five integration edits made by hand from the text, `pulp-open-hwpe` builds
+  in 10 min 36 s and `application/task8/test` (prebuilt ELF, old launcher
+  `gvsoc --target=... --binary`) prints `Test success`.
+- The model has three connections: a register window (`io` slave on the
+  peripheral router), a port of its own into L1 (`io` master, bound to one
+  more input of the L1 interleaver), and a wire to the event unit. Its
+  generator is the old style (`set_component` plus a `CMakeLists.txt`, ports
+  bound by name with no signature).
+- The master side (read, then run): the model fills its one `vp::IoReq`
+  (`init`, `set_addr`, `set_size`, `set_data`, `set_is_write`) and calls
+  `tcdm_port.req(&io_req)`. The call goes through the interleaver into the
+  bank's handler and returns a status; for a read the bytes are in the
+  model's buffer on return. It then reads `io_req.get_latency()`.
+- Timing: a state machine on three clock events. Each phase issues all its
+  L1 requests in one call, so in one cycle, keeps the largest latency, and
+  returns "largest + 1" as the number of cycles until the next phase. It
+  never reads the duration. One job of the test takes 7 cycles (trigger at
+  cycle 154801, interrupt at 154808); the core reaches its wait 18 cycles
+  later and goes on at once, since the event unit kept the event.
+- Only `IO_REQ_OK` is handled; anything else is `trace.fatal("Unsupported
+  access")`, and the port has no response or grant method. The in-tree
+  datamover model (`gvsoc/pulp/pulp/datamover/`) does the same, so this is
+  how the PULP accelerator models are written.
+- The address sent is an L1 offset: no router is on the path, so the model
+  masks the cluster base off the pointer itself. The interleaver picks the
+  bank as `(offset >> 2) & 15` and does no arbitration.
+- The `pulp-open` banks have no timing (`width_bits: -1`), so every latency
+  in the run is 0. With `width_log2=2` given to the banks and the same word
+  read twice in one cycle (run), the second read comes back with latency 1
+  (`Delayed packet (latency: 1)` from the bank) and the phase lasts 2 cycles
+  where it lasted 1. A port that is not a core sees a busy bank, as a
+  latency, in call order.
+- `weight_load()` sets the debug flag on its requests, which makes the bank
+  skip its timing for them (read). No reason given; it looks like a
+  leftover.
+- The other answers, tried with a small master of our own in the tutorial 0
+  system (one beat per cycle, `set_resp_meth` and `set_grant_meth` set):
+  OK with latency 3 gives a beat every 4 cycles; `IO_REQ_PENDING` leaves the
+  buffer untouched until the response callback, which gets the same request
+  object back; `IO_REQ_DENIED` gives the grant callback, then the response;
+  an unmapped address is `IO_REQ_INVALID` from the router with no message.
+  Sending a second request on the same object while the first is pending
+  reaches the slave while it still holds the first: one request object
+  means one request in flight. After the call `req.get_addr()` is what the
+  router made of the address, not what was set.
+- Requests issued in one cycle through a router with `bandwidth=4` came
+  back with latencies one apart (10, 11, 12, 13 behind the core's traffic):
+  the path spreads them out through the latency.
+- Against SNAX (read in `KULeuven-MICAS/snax_cluster` at `8ebd422`,
+  `docs/tutorial/`): the three-port shape, the copy of the registers at the
+  start of a job and "a phase returns its cycles" carry over. Not in the
+  tutorial: address generation with temporal loops and a spatial parfor, one
+  stream per port at its own pace, FIFOs and back-pressure between streamer
+  and accelerator, two register sets, and configuration through `csrw`. The
+  page has the table.
+- Master-side and proxy calls added to `docs/reference/gvsoc_api.md`.
+
+### GVS1 step 16: GVS1 closed
+
+- 2026-10-11. Steps 1 to 12 and 15 done; step 13 written up and on hold;
+  step 14 skipped. Tutorials 8, 9, 11 to 15, 17, 18 and 20 were left out by
+  the plan.
+- Settled:
+  - The pin pair gvsoc `93cedc4` + snitch_cluster `4652c6b`, the container
+    image `ghcr.io/kuleuven-micas/snax-gvsoc:gvs1`, and the layout of this
+    repo. Stock Snitch programs build and run.
+  - Turnaround: a model edit rebuilds in 5 to 20 s, a run of a small test
+    takes 1 to 3 s, a change of generator values or of the tree needs no
+    rebuild, a new module root or a new target rebuilds everything (2 to 10
+    min on 2 cores).
+  - How a model is written: a C++ class with ports plus a Python generator;
+    requests and wires are direct calls that take no time; time comes from a
+    latency on a request or from a clock event; a result is computed at once
+    and delivered later; registers by hand, with `vp::Register` or generated
+    by `regmap-gen`; traces, VCD signals and statistics for looking inside.
+  - Both sides of the `io` interface, with all four answers, on the
+    tutorial core and with a master of our own.
+  - The shape of an accelerator in a cluster, from the HWPE tutorial:
+    register window, own port into the L1 interleaver, done line.
+  - Reference pages to work from: `docs/reference/gvsoc_api.md`,
+    `docs/reference/regmap.md`, and one page per tutorial.
+- Not settled, and the reason GVS2 and GVS3 exist: everything on the Snitch
+  target. All timing figures in this file are from the tutorial's RV64 core
+  or from `pulp-open`.
+- GVS2 starts from: the L1 path of the Snitch target as read
+  (`SnitchClusterTcdm`: per-core router, `L1_interleaver`, banks with
+  `width_log2=3`, a `DmaInterleaver` beside it), and three things to
+  measure there: what the Snitch core does with a latency on a load and on
+  a store, whether two masters on one bank in one cycle give the second a
+  latency (they do on `pulp-open` once the bank has a width), and whether
+  `csrw` to a custom CSR can leave the core. Then the distance of the stock
+  target from the SNAX fork (registers, memory map, DMA).
+- GVS3 starts from: the HWPE shape for the toy component (`start` and
+  `busy` registers, a master port into L1 as one more interleaver input, a
+  clock event per phase or per beat), the regmap flow for its registers,
+  and the list under "Findings for later tasks" for what our own components
+  must do themselves. Open for the day estimates: per-port streams with
+  their own pace, loop address generation, FIFOs between streamer and
+  accelerator, and how events reach the run viewer (VCD, statistics, or
+  commands through the proxy).
+- An input for GVS4 that stands: GVSoC is more involved than expected and
+  thinly documented; a good part of what is written here was found by
+  experiment, and the text or tooling of several tutorials is out of date
+  at the pin (0, 5, 7, 10, 16, the HWPE tooling).
+
 ## Findings for later tasks
 
 ### GVS2
@@ -750,6 +906,22 @@ Differences from the GVSoC website docs: the tutorials are in
   the tree has a Snitch instruction cache model (`snitch_icache.cpp`);
   whether the `snitch` target uses it is not checked. Fetch cost has to be
   kept apart from data cost when reading cycle counts.
+- Measured on `pulp-open-hwpe` (step 15): a master that is not a core,
+  bound to an input of the L1 interleaver, gets a latency of 1 when it hits
+  a bank already used in that cycle, provided the bank has a width
+  (`width_log2`); with no width the bank has no timing at all. The order is
+  the order of the calls inside the cycle, with no round robin and no
+  priority. The Snitch banks have `width_log2=3` (read), so the same is
+  expected there; to be measured with a core and a second master.
+- A model that takes a latency as the cost of an access, as the HWPE and
+  datamover models do, sees contention only as "this access was late". It
+  cannot tell which master it lost to, and the other master is not told
+  either. Conflict counts for the profiles have to come from the bank or
+  from our own L1 model.
+- The PULP accelerator models handle only `IO_REQ_OK` on their L1 port. If
+  our L1 path ever answers pending or denied (to model request and grant as
+  SNAX's TCDM does), every master on it has to handle those answers. How
+  the stock DMA model deals with them has not been read.
 
 ### GVS3
 
@@ -904,3 +1076,39 @@ Differences from the GVSoC website docs: the tutorials are in
 - `printf` (semihosting) aborts behind an asynchronous router. If the SNAX
   model ever holds requests on the path between a core and its memory, the
   debug requests (`req->get_debug()`) must be answered at once.
+- Shape for the GVS3 toy component, from the HWPE tutorial (step 15): a
+  register window (`io` slave), a master port into L1 bound to one more
+  input of the interleaver, a done line; the job copies its registers when
+  it starts; each phase returns its number of cycles and a clock event comes
+  back then.
+- On the master side: one `vp::IoReq` per request in flight, `init()` before
+  every reuse, the buffer given with `set_data`, the status of `req()`
+  checked, `get_latency()` (and `get_duration()` behind a bandwidth) read
+  after an OK. A streamer with several ports needs one request object per
+  port. Keep the address in the model: a router rewrites it in the request.
+- Our masters should set a response and a grant method and handle all four
+  answers, or check in one place that the path can only answer OK. The
+  default callbacks are empty: an unhandled pending answer is lost with no
+  message.
+- An L1 port of ours sends L1 offsets when it is bound to the interleaver
+  directly, and bus addresses when it goes through a router. Decide once
+  which, per port.
+- The tutorial issues a whole phase's requests in one cycle. A SNAX streamer
+  issues one beat per port per cycle. For bank contention and for what the
+  cores see, the second is the one to model; it costs one event per beat
+  (or one per cycle while a stream runs).
+- For the temporal loops of a streamer, the in-tree `HWPEStreamer` class
+  (`gvsoc/pulp/pulp/datamover/include/datamover_streamer.hpp`, nested
+  strides and lengths, up to five dimensions; read) is a starting point. The
+  spatial parfor and the FIFOs are not in the tree.
+- The HWPE tutorial's tooling changes the pinned `gvsoc/pulp` submodule and
+  is partly broken at the pin. If a PULP example is ever needed again, run
+  it in a scratch clone.
+- The proxy (step 13, on hold) is a second way from GVSoC to the SNAX-FORGE
+  run viewer, next to VCD and statistics: a component can answer commands
+  of its own through `handle_command`, so a script can ask a streamer or an
+  accelerator for its state at any stop. Cost per call is 44 ms unless the
+  client socket is set up as in `docs/tutorials/16_python_control.md`.
+- Script accesses through a router with a bandwidth change the timing of the
+  run. A flow that reads L1 through the proxy for the memory viewer should
+  do it at the end of the run, or through a path with no bandwidth.
